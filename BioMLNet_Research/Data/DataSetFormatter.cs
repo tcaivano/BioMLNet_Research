@@ -57,7 +57,7 @@ namespace BioMLNet_Research.Data
             foreach (var file in Directory.GetFiles(dataSetLocation))
             {
                 var destFile = Path.Combine(mergedDataSet, Path.GetFileName(file));
-                File.Copy(file, destFile);
+                File.Copy(file, destFile, true);
             }
 
             // Copy subdirectories
