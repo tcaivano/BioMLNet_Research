@@ -17,7 +17,7 @@ namespace BioMLNet_Research.Model
 {
     internal class ModelTrainer
     {
-        public static string TrainModel(string modelLocation, float testFraction, float learningRate, int batchSize, string saveLocation)
+        public static string TrainModel(string modelLocation, float testFraction, float learningRate, int batchSize, int? epochs, ImageClassificationTrainer.Architecture arch, string saveLocation)
         {
             MLContext mlContext = new MLContext
             {
@@ -40,23 +40,33 @@ namespace BioMLNet_Research.Model
                     .Fit(shuffledData)
                     .Transform(shuffledData);
 
+
+            IDataView trainSet;
+            IDataView validationSet;
             TrainTestData trainSplit = mlContext.Data.TrainTestSplit(data: preProcessedData, testFraction: testFraction);
             TrainTestData validationTestSplit = mlContext.Data.TrainTestSplit(trainSplit.TestSet);
+            trainSet = trainSplit.TrainSet;
+            validationSet = validationTestSplit.TrainSet;
 
-            IDataView trainSet = trainSplit.TrainSet;
-            IDataView validationSet = validationTestSplit.TrainSet;
-            IDataView testSet = validationTestSplit.TestSet;
             var classifierOptions = new ImageClassificationTrainer.Options()
             {
                 FeatureColumnName = "Image",
                 LabelColumnName = "LabelAsKey",
                 ValidationSet = validationSet,
-                Arch = ImageClassificationTrainer.Architecture.ResnetV250,
+                Arch = arch,
                 MetricsCallback = (metrics) => Console.Write("\r" + metrics),
-                TestOnTrainSet = false,
+                TestOnTrainSet = true,
                 ReuseTrainSetBottleneckCachedValues = true,
-                ReuseValidationSetBottleneckCachedValues = true
+                ReuseValidationSetBottleneckCachedValues = true,
+                LearningRate = learningRate,
+                BatchSize = batchSize
             };
+
+            if (epochs != null)
+            {
+                classifierOptions.Epoch = (int)epochs;
+                classifierOptions.EarlyStoppingCriteria = null;
+            }
 
             var trainingPipeline = mlContext.MulticlassClassification.Trainers.ImageClassification(classifierOptions)
                 .Append(mlContext.Transforms.Conversion.MapKeyToValue("PredictedLabel"));
@@ -79,9 +89,9 @@ namespace BioMLNet_Research.Model
             // Load trained model
             ITransformer trainedModel = mlContext.Model.Load(modelLocation, out modelSchema);
             PredictionEngine<ModelInput, ModelOutput> predictionEngine = mlContext.Model.CreatePredictionEngine<ModelInput, ModelOutput>(trainedModel);
+            IEnumerable<ImageData> images = LoadImagesFromDirectory(dataSet);
 
             int correct = 0, incorrect = 0, i = 0;
-            IEnumerable<ImageData> images = LoadImagesFromDirectory(dataSet);
             int total = images.Count();
             foreach(var image in images)
             {
@@ -108,6 +118,63 @@ namespace BioMLNet_Research.Model
             Console.WriteLine($"\nCorrect {correct}, Incorrect {incorrect}");
             float accuracy = (float)correct/((float)(incorrect+correct));
             Console.WriteLine($"Accuracy Score: {accuracy}");
+        }
+
+
+
+        internal static void EvaluateModelAuthentication(string modelLocation, string dataSet)
+        {
+            MLContext mlContext = new MLContext
+            {
+                GpuDeviceId = 0,
+                FallbackToCpu = false
+            };
+
+            //Define DataViewSchema for data preparation pipeline and trained model
+            DataViewSchema modelSchema;
+
+            // Load trained model
+            ITransformer trainedModel = mlContext.Model.Load(modelLocation, out modelSchema);
+            PredictionEngine<ModelInput, ModelOutput> predictionEngine = mlContext.Model.CreatePredictionEngine<ModelInput, ModelOutput>(trainedModel);
+            IEnumerable<ImageData> images = LoadImagesFromDirectory(dataSet);
+
+            int tp = 0, tn = 0, fp = 0, fn = 0, i = 0;
+            int total = images.Count();
+            foreach (var image in images)
+            {
+                var input = new ModelInput()
+                {
+                    Label = image.Label,
+                    LabelAsKey = image.Label == "other" ? 0 : UInt32.Parse(image.Label.Remove(0, 7)),
+                    Image = System.IO.File.ReadAllBytes(image.ImagePath),
+                    ImagePath = image.ImagePath
+                };
+                var p = predictionEngine.Predict(input);
+                if (image.Label == p.PredictedLabel && image.Label != "other")
+                {
+                    tp++;
+                }
+                else if (image.Label == p.PredictedLabel && image.Label == "other")
+                {
+                    tn++;
+                }
+                else if (image.Label != p.PredictedLabel && image.Label != "other")
+                {
+                    fn++;
+                }
+                else
+                {
+                    fp++;
+                }
+                i++;
+                Console.Write($"\rTotal: {total}, Index {i}, True Positive: {tp}, False Negative: {fn}, True Negative: {tn}, False Positive {fp}");
+            }
+
+            Console.WriteLine($"\rTotal: {total}, Index {i}, True Positive: {tp}, False Negative: {fn}, True Negative: {tn}, False Positive {fp}");
+            float pr = (float)tp / (float)((float)tp + (float)fp);
+            float r = (float)tp / ((float)tp + (float)fn);
+            float f1 = (2 * pr * r) / (pr + r);
+            Console.WriteLine($"F1 Score: {f1}");
         }
 
         private static IEnumerable<ImageData> LoadImagesFromDirectory(string folder)
@@ -176,25 +243,6 @@ namespace BioMLNet_Research.Model
                 mlContext.Model.Save(trainedModel, dataViewSchema, fs);
             }
             return filename;
-        }
-
-        /// <summary>
-        /// Displays the training metrics of the trained model.
-        /// </summary>
-        /// <param name="metrics">The binary classification metrics.</param>
-        /// <param name="set">The training set that was used for training</param>
-        /// <param name="trainer">The trainer set that was used for training</param>
-        private static void DisplayTrainingMetricsMulti(MulticlassClassificationMetrics metrics, string set)
-        {
-            Console.WriteLine("");
-            Console.WriteLine($"************************************************************");
-            Console.WriteLine($"*       Metrics for classification model      ");
-            Console.WriteLine($"*       On training set {set}      ");
-            Console.WriteLine($"*-----------------------------------------------------------");
-            Console.WriteLine($"*       F1Score:  {metrics.MicroAccuracy:P2}");
-            Console.WriteLine($"************************************************************");
-            Console.WriteLine("");
-            Console.WriteLine("");
         }
     }
 }
